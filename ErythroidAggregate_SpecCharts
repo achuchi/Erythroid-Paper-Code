@@ -1,0 +1,187 @@
+# Version with RDS based pipeline and just visualization code
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+library(SeuratObject)
+library(monocle3)
+library(patchwork)
+library(grid)
+library(gridExtra)
+
+# Set your working directory to where the RDS files are stored
+
+setwd("INSERT PATH TO RDS FILES FOLDER HERE")
+
+# Load the saved RDS objects
+cds_harmony <- readRDS("RUN3_cds_harmony_trajectory.rds")
+full_seurat_harmony <- readRDS("RUN3_full_seurat_harmony.rds")
+plot_data_harmony <- readRDS("RUN3_harmony_pseudotime_data.rds")
+
+# ---- VISUALIZATION 1: CELL TYPE BY TREATMENT ----
+# Create comparison plot to show cell type distribution by treatment
+treatment_pseudotime_harmony <- ggplot(plot_data_harmony, 
+                                       aes(x = Pseudotime, y = Cell_Type, color = Treatment)) +
+  geom_jitter(size = 2, width = 0, height = 0.3, alpha = 0.8) +
+  scale_x_continuous(breaks = seq(0, 125, 25)) +
+  theme_classic() +
+  labs(
+    x = "Developmental Progression (Harmony Pseudotime)",
+    y = "",
+    title = "Cell Type Distribution by Treatment after Harmony",
+    color = "Treatment"
+  ) +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_line(color = "gray90"),
+    panel.grid.major.y = element_line(color = "gray90")
+  )
+
+# Display and save plot 1
+print(treatment_pseudotime_harmony)
+
+# ---- VISUALIZATION 2: CELL TYPE BY TREATMENT AND DAY ----
+# Create a faceted plot by day
+day_treatment_pseudotime_harmony <- ggplot(plot_data_harmony, 
+                                           aes(x = Pseudotime, y = Cell_Type, color = Treatment)) +
+  geom_jitter(size = 2, width = 0, height = 0.3, alpha = 0.8) +
+  facet_wrap(~ Day, scales = "free_y", ncol = 1) +  # Facets by day
+  scale_x_continuous(breaks = seq(0, 125, 25)) +
+  theme_classic() +
+  labs(
+    x = "Developmental Progression (Harmony Pseudotime)",
+    y = "",
+    title = "Cell Type Distribution by Treatment and Day",
+    color = "Treatment"
+  ) +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_line(color = "gray90"),
+    panel.grid.major.y = element_line(color = "gray90"),
+    strip.background = element_rect(fill = "lightgray"),
+    strip.text = element_text(face = "bold")
+  )
+
+# Display and save plot 2
+print(day_treatment_pseudotime_harmony)
+
+# ---- PIE CHART VISUALIZATIONS WITH PERCENTAGES ----
+
+# Define the specific conditions for analysis
+conditions <- list(
+  list(day = "Day1", min_pt = 35, max_pt = 75),
+  list(day = "Day2", min_pt = 5, max_pt = 25),
+  list(day = "Day2", min_pt = 0, max_pt = 3),
+  list(day = "Day3", min_pt = 0, max_pt = 3),
+  list(day = "Day3", min_pt = 5, max_pt = 25)
+)
+
+# Process each condition to create pie charts
+for(cond in conditions) {
+  day_value <- cond$day
+  min_pt <- cond$min_pt
+  max_pt <- cond$max_pt
+  
+  # Filter data for the specific condition
+  filtered_data <- plot_data_harmony %>%
+    filter(Day == day_value & Pseudotime >= min_pt & Pseudotime <= max_pt)
+  
+  # Skip if no data matches the criteria
+  if(nrow(filtered_data) == 0) {
+    cat("No data found for", day_value, "with pseudotime range", min_pt, "-", max_pt, "\n")
+    next
+  }
+  
+  # Summarize cell counts by treatment and phase
+  phase_summary <- filtered_data %>%
+    group_by(Treatment, Phase) %>%
+    summarise(Count = n(), .groups = 'drop')
+  
+  # Get total cell counts by treatment
+  treatment_totals <- phase_summary %>%
+    group_by(Treatment) %>%
+    summarise(TotalCells = sum(Count), .groups = 'drop')
+  
+  # Calculate percentages and add to the phase summary
+  phase_summary <- phase_summary %>%
+    left_join(treatment_totals, by = "Treatment") %>%
+    mutate(Percentage = round(Count / TotalCells * 100, 1))
+  
+  # Create pie charts for each treatment
+  pie_charts <- list()
+  
+  for(treatment_type in c("Control", "DEX")) {
+    # Get data for this treatment (using Control for NO DEX)
+    treat_data <- phase_summary %>% filter(Treatment == treatment_type)
+    
+    # Skip if no data for this treatment
+    if(nrow(treat_data) == 0) {
+      cat("No data for", treatment_type, "in", day_value, "with pseudotime range", min_pt, "-", max_pt, "\n")
+      next
+    }
+    
+    treat_total <- treatment_totals %>% 
+      filter(Treatment == treatment_type) %>% 
+      pull(TotalCells)
+    
+    # Create title (using NO DEX instead of Control for display)
+    display_treatment <- ifelse(treatment_type == "Control", "NO DEX", treatment_type)
+    
+    # Create pie chart with count AND percentage labels
+    pie <- ggplot(treat_data, aes(x = "", y = Count, fill = Phase)) +
+      geom_bar(stat = "identity", width = 1) +
+      coord_polar("y", start = 0) +
+      scale_fill_manual(values = c(
+        "G1" = "#FF9E9E",  # Light red
+        "G2M" = "#00C094", # Teal
+        "S" = "#81B1FF"    # Light blue
+      )) +
+      geom_text(aes(label = paste0(Count, "\n(", Percentage, "%)")), 
+                position = position_stack(vjust = 0.5), 
+                color = "black", 
+                size = 3.5) +
+      ggtitle(paste(display_treatment, "- n =", treat_total)) +
+      theme_void() +
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 14),
+        legend.position = "bottom"
+      )
+    
+    pie_charts[[treatment_type]] <- pie
+  }
+  
+  # Create a combined plot for this condition
+  if(length(pie_charts) > 0) {
+    # Determine total cells for this condition
+    total_cells <- sum(treatment_totals$TotalCells)
+    
+    # Create descriptive title
+    title <- paste0(day_value, ", Pseudotime ", min_pt, "-", max_pt, 
+                    " (Total cells: ", total_cells, ")")
+    
+    # Arrange plots in a grid without the summary text
+    combined_plot <- gridExtra::grid.arrange(
+      grobs = pie_charts,
+      ncol = length(pie_charts),
+      top = textGrob(title, gp = gpar(fontsize = 16, fontface = "bold"))
+    )
+    
+    # Define filename
+    filename <- paste0(output_dir, "/CellCycle_Phase_", day_value, 
+                       "_PT", min_pt, "-", max_pt, ".png")
+    
+    # Save the plot
+    ggsave(
+      filename = filename,
+      plot = combined_plot,
+      width = 7,
+      height = 5,
+      dpi = 300
+    )
+    
+    # Display the plot
+    print(combined_plot)
+    
+    # Print progress
+    cat("Created pie chart for", day_value, "with pseudotime range", min_pt, "-", max_pt, "\n")
+  }
+}
